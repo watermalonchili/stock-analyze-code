@@ -1,0 +1,18 @@
+[
+  {
+    "index": "0923",
+    "name": "0923",
+    "lines": [
+      "MA4",
+      "MA8",
+      "MA12",
+      "MA16",
+      "MA20",
+      "MA47"
+    ],
+    "is_custom": true,
+    "is_yolo": true,
+    "analysis_mode": "KLINE",
+    "modeDescription": "YOLO 检测模型，基于 8 个样本+数据增强训练"
+  }
+]

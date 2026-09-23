@@ -1,0 +1,462 @@
+{
+  "mode_name": "wbtest_kline_20260723",
+  "renderer_version": "pillow-kline-v1",
+  "context_days": 150,
+  "seed": 42,
+  "positive_source_count": 50,
+  "negative_source_count": 10,
+  "augmented_positive_count": 250,
+  "written_negative_count": 10,
+  "positive_samples": [
+    {
+      "code": "600562",
+      "start_date": "2022-12-15",
+      "end_date": "2023-02-06",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "002078",
+      "start_date": "2020-04-16",
+      "end_date": "2020-06-03",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "002044",
+      "start_date": "2019-08-28",
+      "end_date": "2019-10-18",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "688017",
+      "start_date": "2023-09-08",
+      "end_date": "2023-10-31",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "600292",
+      "start_date": "2022-09-21",
+      "end_date": "2022-11-10",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "002155",
+      "start_date": "2019-04-22",
+      "end_date": "2019-06-10",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "600563",
+      "start_date": "2020-07-22",
+      "end_date": "2020-09-03",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "002262",
+      "start_date": "2019-07-15",
+      "end_date": "2019-08-27",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "603899",
+      "start_date": "2019-07-15",
+      "end_date": "2019-08-27",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "600985",
+      "start_date": "2024-08-09",
+      "end_date": "2024-09-25",
+      "context_target_indexes": [
+        100,
+        131
+      ]
+    },
+    {
+      "code": "603786",
+      "start_date": "2020-10-22",
+      "end_date": "2020-12-04",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "002601",
+      "start_date": "2022-09-21",
+      "end_date": "2022-11-10",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "601555",
+      "start_date": "2021-10-25",
+      "end_date": "2021-12-07",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "688363",
+      "start_date": "2024-05-28",
+      "end_date": "2024-07-11",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "002064",
+      "start_date": "2021-03-19",
+      "end_date": "2021-05-07",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "002025",
+      "start_date": "2024-08-09",
+      "end_date": "2024-09-25",
+      "context_target_indexes": [
+        100,
+        131
+      ]
+    },
+    {
+      "code": "002318",
+      "start_date": "2022-12-15",
+      "end_date": "2023-02-06",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "002195",
+      "start_date": "2021-09-24",
+      "end_date": "2021-11-15",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "002461",
+      "start_date": "2023-04-27",
+      "end_date": "2023-06-14",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "002608",
+      "start_date": "2024-08-09",
+      "end_date": "2024-09-25",
+      "context_target_indexes": [
+        100,
+        131
+      ]
+    },
+    {
+      "code": "300395",
+      "start_date": "2024-08-09",
+      "end_date": "2024-09-25",
+      "context_target_indexes": [
+        100,
+        131
+      ]
+    },
+    {
+      "code": "300474",
+      "start_date": "2019-07-15",
+      "end_date": "2019-08-27",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "000009",
+      "start_date": "2022-09-21",
+      "end_date": "2022-11-10",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "300751",
+      "start_date": "2024-03-20",
+      "end_date": "2024-05-09",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "601865",
+      "start_date": "2021-11-19",
+      "end_date": "2022-01-04",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "000729",
+      "start_date": "2020-09-04",
+      "end_date": "2020-10-27",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "688568",
+      "start_date": "2022-12-13",
+      "end_date": "2023-02-02",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "000027",
+      "start_date": "2022-07-26",
+      "end_date": "2022-09-07",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "000009",
+      "start_date": "2020-08-25",
+      "end_date": "2020-10-15",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "002850",
+      "start_date": "2021-04-23",
+      "end_date": "2021-06-10",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "000785",
+      "start_date": "2024-02-27",
+      "end_date": "2024-04-12",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "603568",
+      "start_date": "2021-09-24",
+      "end_date": "2021-11-15",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "000591",
+      "start_date": "2021-06-24",
+      "end_date": "2021-08-06",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "600256",
+      "start_date": "2021-11-04",
+      "end_date": "2021-12-17",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "601016",
+      "start_date": "2024-03-20",
+      "end_date": "2024-05-09",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "300373",
+      "start_date": "2023-09-15",
+      "end_date": "2023-11-07",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "002007",
+      "start_date": "2021-09-10",
+      "end_date": "2021-11-03",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "600967",
+      "start_date": "2019-07-15",
+      "end_date": "2019-08-27",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "002032",
+      "start_date": "2024-03-08",
+      "end_date": "2024-04-24",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "001309",
+      "start_date": "2024-05-21",
+      "end_date": "2024-07-04",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "600884",
+      "start_date": "2021-08-31",
+      "end_date": "2021-10-22",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "002831",
+      "start_date": "2020-07-22",
+      "end_date": "2020-09-03",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "000537",
+      "start_date": "2020-04-16",
+      "end_date": "2020-06-03",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "601997",
+      "start_date": "2023-12-12",
+      "end_date": "2024-01-25",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "601991",
+      "start_date": "2022-12-15",
+      "end_date": "2023-02-06",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "688313",
+      "start_date": "2023-09-14",
+      "end_date": "2023-11-06",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "002756",
+      "start_date": "2023-11-20",
+      "end_date": "2024-01-03",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "002299",
+      "start_date": "2020-12-11",
+      "end_date": "2021-01-26",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "300207",
+      "start_date": "2020-04-16",
+      "end_date": "2020-06-03",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    },
+    {
+      "code": "603225",
+      "start_date": "2023-07-21",
+      "end_date": "2023-09-04",
+      "context_target_indexes": [
+        60,
+        91
+      ]
+    }
+  ]
+}

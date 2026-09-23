@@ -1,0 +1,5 @@
+path: E:\gitClone\tool_sim_back\custom_modes\yolo_test_a7573ab4
+train: images
+val: images
+names:
+  0: target_pattern

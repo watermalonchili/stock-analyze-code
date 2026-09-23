@@ -1,0 +1,10 @@
+__pycache__
+*.pyc
+.env
+Dockerfile
+.dockerignore
+README.md
+.git
+.idea
+venv
+data/  # 不复制本地数据，使用挂载卷

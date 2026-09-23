@@ -1,0 +1,36 @@
+version: '3.8'
+services:
+  # 前端服务
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:80"
+    environment:
+      - NODE_ENV=production
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  # 后端服务（指向您之前部署的 Python 应用）
+  backend:
+    build:
+      context: ../tool_sim_back # 根据实际情况调整路径
+      dockerfile: Dockerfile
+    ports:
+      - "5000:5000"
+    volumes:
+      - D:\self\data\kline-data:/data
+    environment:
+      - FLASK_ENV=production
+      - DATA_FOLDER=/data
+    restart: unless-stopped
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge

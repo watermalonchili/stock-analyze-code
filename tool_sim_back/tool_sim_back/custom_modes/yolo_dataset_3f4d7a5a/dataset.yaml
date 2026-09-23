@@ -1,0 +1,5 @@
+path: D:\lsy\gitclone\stockAnalyze\tool_sim_back\custom_modes\yolo_dataset_3f4d7a5a
+train: images
+val: images
+names:
+  0: target_pattern

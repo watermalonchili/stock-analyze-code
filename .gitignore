@@ -1,0 +1,19 @@
+# ===== 环境 / 依赖（不推送）=====
+.venv/
+venv/
+env/
+node_modules/
+
+# ===== 本地编辑器数据（不推送）=====
+.idea/
+.vscode/
+*.iml
+
+# ===== Python 生成缓存（不推送）=====
+__pycache__/
+*.py[cod]
+*$py.class
+
+# ===== 旧项目（本仓库只含 tool_sim / tool_sim_back / 两个说明书 md）=====
+stock-analyze-code/
+stock-analyze-code.zip

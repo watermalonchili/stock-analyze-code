@@ -1,0 +1,5 @@
+path: E:\gitClone\tool_sim_back\custom_modes\wbtest_kline_20260723_dataset
+train: images
+val: images
+names:
+  0: target_pattern
