@@ -1,3 +1,4 @@
+import json
 import re
 from openai import OpenAI
 
@@ -18,6 +19,14 @@ def generate_ai_filter(tags, custom_prompt):
     """
     if not tags and not custom_prompt:
         return lambda df: True  # 如果没传标签，默认全部放行
+
+    # 打印本次传给 DeepSeek 的语义标签与补充要求（便于排查过滤逻辑）
+    try:
+        _tags_dump = json.dumps(tags, ensure_ascii=False, default=str)
+    except Exception:
+        _tags_dump = str(tags)
+    print(f"\n🤖 [传给 DeepSeek 的语义标签] {_tags_dump}")
+    print(f"🤖 [传给 DeepSeek 的补充要求] {custom_prompt}\n")
 
     # 【极其严谨的 Prompt 架构】
     prompt = f"""

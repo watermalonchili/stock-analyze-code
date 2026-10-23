@@ -271,6 +271,20 @@
                                 ></el-input-number>
                               </div>
                               <span style="margin-left: 5px;">{{ feat.unit }}</span>
+                              <!-- 头肩底专属特征：额外的可调阈值 -->
+                              <template v-if="feat.threshold !== undefined">
+                                <span style="margin: 0 4px 0 10px; color: #909399;">阈值{{ feat.compare || '' }}</span>
+                                <div @click.stop.prevent>
+                                  <el-input-number
+                                      v-model="feat.threshold"
+                                      :min="0"
+                                      size="small"
+                                      controls-position="right"
+                                      style="width: 75px;"
+                                  ></el-input-number>
+                                </div>
+                                <span style="margin-left: 5px;">{{ feat.unit }}</span>
+                              </template>
                             </div>
 
                             <!-- 如果是普通的纯文本特征（如均线交叉、上行趋势） -->
@@ -1404,6 +1418,137 @@ const updateGraphicPosition = () => {
 
 window.addEventListener('resize', updateGraphicPosition);
 
+// ==================== 头肩底识别（K线骨架模式，纯前端） ====================
+const patternType = ref('');
+
+// 头肩底专属特征默认阈值（可调）
+const HSB_THRESHOLDS = {
+  headDepth: 4,        // 头部深度 ≥ 4%
+  shoulderDiff: 8,     // 左右肩价格差 ≤ 8%
+  gapDays: 10,         // 关键点时间间隔 ≥ 10 交易日
+  necklineSlope: 15,   // 颈线斜率 |值| ≤ 15%
+  priorDecline: 5,     // 前期下跌幅度 ≥ 5%
+};
+
+// 归一化日期为 8 位数字串（兼容 YYYY-MM-DD / YYYY/MM/DD 等）
+const _normDate = (d) => String(d == null ? '' : d).replace(/\D/g, '').slice(0, 8);
+
+// 由每日交易历构建 date -> 交易日索引 映射（用于精确计算交易日间隔）
+function _buildTradingIndexMap(segmentData) {
+  const m = {};
+  (segmentData || []).forEach((item, i) => {
+    const d = _normDate(item && item.trade_date);
+    if (d && !(d in m)) m[d] = i;
+  });
+  return m;
+}
+
+// 计算两个骨架点之间的交易日间隔（索引差）；日期不在交易历内返回 null
+function _tradingGap(idxMap, dateA, dateB) {
+  const ia = idxMap[_normDate(dateA)];
+  const ib = idxMap[_normDate(dateB)];
+  if (ia === undefined || ib === undefined) return null;
+  return Math.abs(ib - ia);
+}
+
+// 识别头肩底：严格判定，必须满足 头部深度≥4% / 两肩价差≤8% / 时间间隔≥10交易日
+function detectHeadShoulderBottom(points, segmentData) {
+  if (!Array.isArray(points) || points.length < 6) return null;
+  const sorted = points.slice().sort((a, b) => new Date(a.date) - new Date(b.date));
+  const prices = sorted.map(p => Number(p.price));
+  const n = sorted.length;
+  const idxMap = _buildTradingIndexMap(segmentData);
+
+  // 局部谷（严格小于两侧；端点做单侧判定，兼容右肩在末尾的情况）
+  const isValley = new Array(n).fill(false);
+  for (let i = 1; i < n - 1; i++) {
+    if (prices[i] < prices[i - 1] && prices[i] < prices[i + 1]) isValley[i] = true;
+  }
+  if (n >= 2) {
+    if (prices[0] < prices[1]) isValley[0] = true;
+    if (prices[n - 1] < prices[n - 2]) isValley[n - 1] = true;
+  }
+
+  // 头底 P3 = 全局最低（区间绝对最低点）
+  let headIdx = 0;
+  for (let i = 1; i < n; i++) if (prices[i] < prices[headIdx]) headIdx = i;
+  if (headIdx <= 0 || headIdx >= n - 1) return null;
+  const headPrice = prices[headIdx];
+
+  // 左肩 P1：头底左侧最近、间隔≥10、深度≥4% 的谷
+  let p1 = -1;
+  for (let i = headIdx - 1; i >= 0; i--) {
+    if (!isValley[i]) continue;
+    const gap = _tradingGap(idxMap, sorted[i].date, sorted[headIdx].date);
+    if (gap === null || gap < HSB_THRESHOLDS.gapDays) continue;
+    if ((prices[i] - headPrice) / prices[i] * 100 < HSB_THRESHOLDS.headDepth) continue;
+    p1 = i; break;
+  }
+  if (p1 < 1) return null;  // 需有起跌峰在其之前
+
+  // 右肩 P5：头底右侧最近、间隔≥10、深度≥4% 的谷
+  let p5 = -1;
+  for (let i = headIdx + 1; i < n; i++) {
+    if (!isValley[i]) continue;
+    const gap = _tradingGap(idxMap, sorted[headIdx].date, sorted[i].date);
+    if (gap === null || gap < HSB_THRESHOLDS.gapDays) continue;
+    if ((prices[i] - headPrice) / prices[i] * 100 < HSB_THRESHOLDS.headDepth) continue;
+    p5 = i; break;
+  }
+  if (p5 < 0 || p5 - headIdx < 2) return null;
+
+  // 左颈线 P2 = 左肩与头底之间的最高点（严格内部，且高于左肩）
+  if (headIdx - p1 < 2) return null;
+  let p2 = -1;
+  for (let i = p1 + 1; i < headIdx; i++) if (p2 < 0 || prices[i] > prices[p2]) p2 = i;
+  if (p2 < 0 || prices[p2] <= prices[p1]) return null;
+
+  // 右颈线 P4 = 头底与右肩之间的最高点（严格内部，且高于右肩）
+  let p4 = -1;
+  for (let i = headIdx + 1; i < p5; i++) if (p4 < 0 || prices[i] > prices[p4]) p4 = i;
+  if (p4 < 0 || prices[p4] <= prices[p5]) return null;
+
+  // 起跌点 P0 = 左肩之前的最高点（用于前期下跌幅度）
+  let p0 = 0;
+  for (let i = 0; i < p1; i++) if (prices[i] > prices[p0]) p0 = i;
+  if (prices[p0] <= prices[p1]) return null;
+
+  const depthLeft = (prices[p1] - headPrice) / prices[p1] * 100;
+  const depthRight = (prices[p5] - headPrice) / prices[p5] * 100;
+  const shoulderDev = Math.abs(prices[p1] - prices[p5]) / Math.min(prices[p1], prices[p5]) * 100;
+  const gapLeft = _tradingGap(idxMap, sorted[p1].date, sorted[headIdx].date);
+  const gapRight = _tradingGap(idxMap, sorted[headIdx].date, sorted[p5].date);
+  if (gapLeft === null || gapRight === null) return null;
+
+  // 严格判定：① 深度、③ 价差、④ 间隔
+  if (depthLeft < HSB_THRESHOLDS.headDepth || depthRight < HSB_THRESHOLDS.headDepth) return null;
+  if (shoulderDev > HSB_THRESHOLDS.shoulderDiff) return null;
+  if (gapLeft < HSB_THRESHOLDS.gapDays || gapRight < HSB_THRESHOLDS.gapDays) return null;
+
+  const necklineSlope = (prices[p4] - prices[p2]) / prices[p2] * 100;
+  const priorDecline = (prices[p0] - prices[p1]) / prices[p0] * 100;
+
+  return {
+    p0: sorted[p0], p1: sorted[p1], p2: sorted[p2], head: sorted[headIdx],
+    p4: sorted[p4], p5: sorted[p5],
+    gapLeft, gapRight, depthLeft, depthRight, shoulderDev, necklineSlope, priorDecline,
+  };
+}
+
+// 构建 5 项头肩底专属特征（含计算值 value 与可调阈值 threshold）
+function buildHeadShoulderFeatures(r) {
+  const round1 = (x) => Math.round(x * 10) / 10;
+  const headDepth = Math.min(r.depthLeft, r.depthRight);
+  const gap = Math.min(r.gapLeft, r.gapRight);
+  return [
+    { desc: '头部深度', compare: '≥', hasValue: true, value: round1(headDepth), threshold: HSB_THRESHOLDS.headDepth, unit: '%', weight: 1.0, selected: true },
+    { desc: '左右肩价格差', compare: '≤', hasValue: true, value: round1(r.shoulderDev), threshold: HSB_THRESHOLDS.shoulderDiff, unit: '%', weight: 1.0, selected: true },
+    { desc: '关键点时间间隔', compare: '≥', hasValue: true, value: gap, threshold: HSB_THRESHOLDS.gapDays, unit: '日', weight: 1.0, selected: true },
+    { desc: '颈线斜率', compare: '|≤', hasValue: true, value: round1(r.necklineSlope), threshold: HSB_THRESHOLDS.necklineSlope, unit: '%', weight: 1.0, selected: true },
+    { desc: '前期下跌幅度', compare: '≥', hasValue: true, value: round1(r.priorDecline), threshold: HSB_THRESHOLDS.priorDecline, unit: '%', weight: 1.0, selected: true },
+  ];
+}
+
 const confirmSkeletonAndNext = () => {
   skeletonDialogVisible.value = false;
 
@@ -1417,6 +1562,9 @@ const confirmSkeletonAndNext = () => {
     if (p.price > maxPrice) maxPrice = p.price;
     if (p.price < minPrice) minPrice = p.price;
   });
+
+  const hsbResult = detectHeadShoulderBottom(skeletonPoints.value, extractedSegmentData.value);
+  patternType.value = hsbResult ? 'head_shoulder_bottom' : '';
 
   const autoFeats = [];
   const physicalAmplitude = ((maxPrice - minPrice) / minPrice * 100).toFixed(1);
@@ -1470,8 +1618,9 @@ const confirmSkeletonAndNext = () => {
 
   const { startDate, endDate } = activeBrushData.value;
   extractedFeatures.value = { startDate, endDate };
-  dynamicFeatures.value = autoFeats;
+  dynamicFeatures.value = hsbResult ? buildHeadShoulderFeatures(hsbResult) : autoFeats;
   customFeatureText.value = '';
+  store.commit("updateNewSearchInfoProperty", { key: 'patternType', value: patternType.value });
 
   currentStep.value = 1;
   featureDialogVisible.value = true;
@@ -1565,9 +1714,16 @@ const confirmFeatureAndSearch = () => {
   const { startDate, endDate } = activeBrushData.value;
   saveCurrentBrushInternal(timestamp, startDate, endDate);
 
-  const finalFeatures = dynamicFeatures.value.filter(f => f.selected).map(f => ({
-    desc: f.desc, value: f.value, unit: f.unit, hasValue: f.hasValue, weight: f.weight, selected: f.selected
-  }));
+  const finalFeatures = dynamicFeatures.value.filter(f => f.selected).map(f => {
+    // 头肩底专属特征：按可调阈值过滤，desc 拼上比较方向 + 阈值，value 用阈值
+    if (f.threshold !== undefined) {
+      return {
+        desc: `${f.desc}${f.compare || '≥'}${f.threshold}${f.unit}`,
+        value: f.threshold, unit: f.unit, hasValue: true, weight: f.weight, selected: f.selected
+      };
+    }
+    return { desc: f.desc, value: f.value, unit: f.unit, hasValue: f.hasValue, weight: f.weight, selected: f.selected };
+  });
 
   store.commit("updateNewSearchInfoProperty", {
     key: 'extractedFeatures',

@@ -566,6 +566,25 @@ def _skeleton_to_target(skeleton_points, window_size):
     return interp.tolist()
 
 
+# 骨架提取统一配置（目标骨架与候选骨架必须用同一套规则，节点数才可比）
+# importance_threshold=6.0：让骨架节点数在 4~8 之间真实浮动（1.0 时恒为 8，节点数筛选无意义）
+SKELETON_EXTRACT_CONFIG = {'min_time_gap': 2, 'importance_threshold': 6.0, 'min_points': 4, 'max_points': 8}
+
+
+
+def _extract_skeleton_points(df):
+    """从行情 DataFrame 提取骨架点列表（与 /api/extract_skeleton 同配置）。
+
+    输入 DataFrame 需含 high/low/close/trade_date(datetime) 列。
+    返回 SkeletonPoint 列表，长度 4~8（非固定 8）。
+    """
+    # 关键：重置索引。SkeletonLearner 内部用 df.loc[start:end] 做标签索引，
+    # 若索引非连续（如经 calculate_ma dropna 后的切片）会取空，导致 idxmax 报「empty sequence」。
+    df = df.reset_index(drop=True)
+    learner = SkeletonLearner(SKELETON_EXTRACT_CONFIG)
+    return learner.extract_skeleton_from_segment(df, 0, len(df) - 1).points
+
+
 def _dtw_similarity(target, query):
     """DTW 动态时间弯曲相似度 (0~1)，值越大越相似"""
     t = np.asarray(target, dtype=float)
@@ -1907,33 +1926,10 @@ def handle_find_similar_stocks_llm():
         # ==========================================
         # 🌟 算法2：K线骨架相似度 (DTW 动态时间弯曲)
         # ==========================================
-        def calc_kline_dtw_similarity(df_target, df_window):
+        def calc_kline_dtw_similarity(target_seq, df_window):
+            # 统一 Z-score 归一化的 DTW（与 realtime_scan / analyze_stock_history 一致）
             try:
-                # 提取收盘价序列作为趋势代表
-                t_data = df_target['close'].values
-                w_data = df_window['close'].values
-
-                # 归一化 (Min-Max) 以消除绝对价格差异
-                t_norm = (t_data - np.min(t_data)) / (np.ptp(t_data) + 1e-8)
-                w_norm = (w_data - np.min(w_data)) / (np.ptp(w_data) + 1e-8)
-
-                n, m = len(t_norm), len(w_norm)
-                # 初始化 DTW 矩阵
-                dtw_matrix = np.full((n + 1, m + 1), float('inf'))
-                dtw_matrix[0, 0] = 0
-
-                # 动态规划计算最小弯曲路径距离
-                for i in range(1, n + 1):
-                    for j in range(1, m + 1):
-                        cost = abs(t_norm[i - 1] - w_norm[j - 1])
-                        dtw_matrix[i, j] = cost + min(dtw_matrix[i - 1, j],  # 插入
-                                                      dtw_matrix[i, j - 1],  # 删除
-                                                      dtw_matrix[i - 1, j - 1])  # 匹配
-
-                dist = dtw_matrix[n, m]
-                # 将距离转化为相似度得分 (距离越小，相似度越接近 1.0)
-                sim = np.exp(-dist / max(n, m))
-                return float(sim) if sim > 0 else 0.0
+                return _dtw_similarity(target_seq, df_window['close'].values)
             except Exception as e:
                 print("DTW 计算出错:", e)
                 return 0.0
@@ -1941,6 +1937,13 @@ def handle_find_similar_stocks_llm():
         results = []
         # 获取前端传来的分析模式
         analysis_mode = data.get('analysis_mode', 'MA')
+        custom_skeleton = data.get('custom_skeleton', []) or []
+        target_skeleton_count = len(custom_skeleton) if custom_skeleton else 0
+        # K线模式：用用户确认的骨架插值作为目标序列
+        target_seq_kline = None
+        if analysis_mode == 'KLINE' and target_skeleton_count >= 2:
+            target_seq_kline = _skeleton_to_target(custom_skeleton, window_size)
+            print(f"🎯 [目标骨架] {target_skeleton_count} 个节点 → 插值成 {window_size} 点目标序列")
         # 【新增】：初始化三个计数器
         stats = {"total": 0, "after_llm_filter": 0, "after_similarity_filter": 0}
         # 3. 开启真正的历史滑动窗口扫描
@@ -1963,8 +1966,9 @@ def handle_find_similar_stocks_llm():
                     continue
                     # 第二关：根据模式，分发给不同的底层数学引擎
                 if analysis_mode == 'KLINE':
-                    # K 线模式 -> 走 DTW 算法
-                    sim_score = calc_kline_dtw_similarity(target_df, window_df)
+                    # K 线模式 -> 走 DTW 算法（目标用骨架插值序列，兜底用收盘价）
+                    target_for_sim = target_seq_kline if target_seq_kline is not None else target_df['close'].values
+                    sim_score = calc_kline_dtw_similarity(target_for_sim, window_df)
                 else:
                     # 均线模式 -> 走 皮尔逊 算法
                     sim_score = calc_shape_similarity(target_df, window_df, ma_cols)
@@ -1974,6 +1978,20 @@ def handle_find_similar_stocks_llm():
 
                 # 相似度阈值
                 if sim_score > 0.6:
+                    # 新增：骨架节点数筛选（仅 KLINE 且目标有骨架时）
+                    candidate_skeleton_count = -1
+                    if analysis_mode == 'KLINE' and target_skeleton_count > 0:
+                        try:
+                            w = window_df.copy()
+                            w['trade_date'] = pd.to_datetime(w['trade_date'])
+                            candidate_skeleton_count = len(_extract_skeleton_points(w))
+                        except Exception as e:
+                            print(f"    ⚠️ 骨架提取失败 {code}: {e}")
+                            candidate_skeleton_count = -1
+                        if candidate_skeleton_count != target_skeleton_count:
+                            print(f"    🔍 [节点数不符] {code} 目标{target_skeleton_count} vs 候选{candidate_skeleton_count}，剔除")
+                            continue
+
                     stats["after_similarity_filter"] += 1  # 【修复】：在这里加计数！
                     mode_str = "K线DTW" if analysis_mode == 'KLINE' else "均线Pearson"
                     print(
@@ -1985,6 +2003,8 @@ def handle_find_similar_stocks_llm():
                         "similarity": round(sim_score, 4),
                         "recent_data": window_df.to_dict('records'),
                         "ma_list": ma_list,
+                        "target_skeleton_count": target_skeleton_count,
+                        "candidate_skeleton_count": candidate_skeleton_count,
                     })
                 else:
                     # 如果逻辑符合，但长得实在太丑（相似度太低），也打印出来看看
@@ -2012,10 +2032,21 @@ def handle_find_similar_stocks_llm():
                 for i in range(0, len(df) - window_size + 1, step_size):
                     window_df = df.iloc[i: i + window_size].copy()
                     if analysis_mode == 'KLINE':
-                        sim_score = calc_kline_dtw_similarity(target_df, window_df)
+                        target_for_sim = target_seq_kline if target_seq_kline is not None else target_df['close'].values
+                        sim_score = calc_kline_dtw_similarity(target_for_sim, window_df)
                     else:
                         sim_score = calc_shape_similarity(target_df, window_df, ma_cols)
                     if sim_score > lenient_threshold:
+                        candidate_skeleton_count = -1
+                        if analysis_mode == 'KLINE' and target_skeleton_count > 0:
+                            try:
+                                w = window_df.copy()
+                                w['trade_date'] = pd.to_datetime(w['trade_date'])
+                                candidate_skeleton_count = len(_extract_skeleton_points(w))
+                            except Exception:
+                                candidate_skeleton_count = -1
+                            if candidate_skeleton_count != target_skeleton_count:
+                                continue
                         stats["after_similarity_filter"] += 1
                         results.append({
                             "stock_code": code,
@@ -2023,6 +2054,8 @@ def handle_find_similar_stocks_llm():
                             "similarity": round(sim_score, 4),
                             "recent_data": window_df.to_dict('records'),
                             "ma_list": ma_list,
+                            "target_skeleton_count": target_skeleton_count,
+                            "candidate_skeleton_count": candidate_skeleton_count,
                         })
             results = sorted(results, key=lambda x: x['similarity'], reverse=True)[:50]
             print(f"✅ [宽松模式] 补救找到 {len(results)} 个结果（阈值 {lenient_threshold}）")
@@ -2035,6 +2068,7 @@ def handle_find_similar_stocks_llm():
             "filter_stats": stats,
             "count": len(results),
             "target_code": target_code,
+            "target_skeleton_count": target_skeleton_count,
             "base_ma_periods": ma_list,
             "base_segment": target_df[['trade_date'] + ma_cols].to_dict('records')
         }), 200
@@ -2065,13 +2099,8 @@ def extract_skeleton():
         # 确保 trade_date 是 datetime 类型
         df['trade_date'] = pd.to_datetime(df['trade_date'])
 
-        # 2. 初始化你的学习器配置
-        config = {
-            'min_time_gap': 2,
-            'importance_threshold': 1.0,
-            'min_points': 4,
-            'max_points': 8
-        }
+        # 2. 初始化你的学习器配置（与候选骨架提取共用同一套配置）
+        config = SKELETON_EXTRACT_CONFIG
         learner = SkeletonLearner(config)
 
         # 3. 提取骨架
