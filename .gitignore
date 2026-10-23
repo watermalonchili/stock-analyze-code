@@ -17,3 +17,7 @@ __pycache__/
 # ===== 旧项目（本仓库只含 tool_sim / tool_sim_back / 两个说明书 md）=====
 stock-analyze-code/
 stock-analyze-code.zip
+
+# ===== 运行时生成数据（不推送）=====
+brush_history.json
+savepng/
