@@ -8,6 +8,7 @@ from config import Config
 from json_config import move_images_to_new_folder, read_json_data, write_json_data
 from utils import calculate_ma, get_stock_data
 from datetime import timedelta
+from functools import lru_cache
 import os
 # 首先添加必要的导入
 import pandas as pd
@@ -572,6 +573,24 @@ SKELETON_EXTRACT_CONFIG = {'min_time_gap': 2, 'importance_threshold': 6.0, 'min_
 
 
 
+class ArrayLookup:
+    """连续整数索引窗口的只读取数代理。范围切片仍由原loc执行。"""
+
+    def __init__(self, frame):
+        self.frame = frame
+        self.columns = {column: frame[column].array for column in ('high', 'low', 'close', 'trade_date')}
+        self.loc = self
+
+    def __len__(self):
+        return len(self.frame)
+
+    def __getitem__(self, key):
+        row, column = key
+        if isinstance(row, int) and 0 <= row < len(self.frame) and column in self.columns:
+            return self.columns[column][row]
+        return self.frame.loc[key]
+
+
 def _extract_skeleton_points(df):
     """从行情 DataFrame 提取骨架点列表（与 /api/extract_skeleton 同配置）。
 
@@ -582,10 +601,12 @@ def _extract_skeleton_points(df):
     # 若索引非连续（如经 calculate_ma dropna 后的切片）会取空，导致 idxmax 报「empty sequence」。
     df = df.reset_index(drop=True)
     learner = SkeletonLearner(SKELETON_EXTRACT_CONFIG)
-    return learner.extract_skeleton_from_segment(df, 0, len(df) - 1).points
+    if len(df) < 2 or not {'high', 'low', 'close', 'trade_date'}.issubset(df.columns) or not df.columns.is_unique:
+        return learner.extract_skeleton_from_segment(df, 0, len(df) - 1).points
+    return learner.extract_skeleton_from_segment(ArrayLookup(df), 0, len(df) - 1).points
 
 
-def _dtw_similarity(target, query):
+def _dtw_similarity_scalar(target, query):
     """DTW 动态时间弯曲相似度 (0~1)，值越大越相似"""
     t = np.asarray(target, dtype=float)
     q = np.asarray(query, dtype=float)
@@ -605,6 +626,34 @@ def _dtw_similarity(target, query):
             dp[i, j] = cost + min(dp[i-1, j], dp[i, j-1], dp[i-1, j-1])
     dist = dp[n, m] / max(n, m)
     return float(np.exp(-dist))
+
+
+def _dtw_similarity(target, query):
+    """按反对角线批量计算原 DTW 递推。"""
+    t, q = np.asarray(target, dtype=float), np.asarray(query, dtype=float)
+    n, m = len(t), len(q)
+    if not n or not m:
+        return 0.0
+    if t.ndim != 1 or q.ndim != 1 or not np.isfinite(t).all() or not np.isfinite(q).all():
+        return _dtw_similarity_scalar(target, query)
+    t = (t - t.mean()) / (t.std() + 1e-8)
+    q = (q - q.mean()) / (q.std() + 1e-8)
+    dp = np.full((n + 1, m + 1), np.inf)
+    dp[0, 0] = 0.0
+    # 同一反对角线的格子只依赖此前已经算完的反对角线。
+    for i, j in _dtw_diagonals(n, m):
+        dp[i, j] = np.abs(t[i-1] - q[j-1]) + np.minimum(np.minimum(dp[i-1, j], dp[i, j-1]), dp[i-1, j-1])
+    return float(np.exp(-dp[n, m] / max(n, m)))
+
+
+@lru_cache(maxsize=32)
+def _dtw_diagonals(n, m):
+    indices = []
+    for d in range(2, n + m + 1):
+        i = np.arange(max(1, d-m), min(n, d-1)+1)
+        indices.append((i, d-i))
+    return indices
+
 
 
 @app.route('/api/realtime_scan', methods=['POST'])
