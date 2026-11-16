@@ -1,10 +1,11 @@
+import os
 import json
 import re
 from openai import OpenAI
 
 # 初始化 DeepSeek 客户端
 # 注意：在生产环境中建议将 API Key 放在环境变量中
-DEEPSEEK_API_KEY = "sk-1b1877dcd19d47b4b355d662fe0e95bd"
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 
 client = OpenAI(
     api_key=DEEPSEEK_API_KEY,
@@ -12,7 +13,7 @@ client = OpenAI(
 )
 
 
-def generate_ai_filter(tags, custom_prompt):
+def generate_ai_filter(tags, custom_prompt, *, strict=False, raise_on_failure=False):
     """
     调用 DeepSeek-Coder 将前端标签翻译为 Pandas 滑窗过滤代码
     关键：生成宽松的过滤规则，避免全量过滤
@@ -58,6 +59,21 @@ def generate_ai_filter(tags, custom_prompt):
        10. 只输出纯净的 Python 代码，不要任何中文解释！不要输出 ```python 标记！
        """
 
+    if strict:
+        prompt = f"""
+        生成一个 Python 函数 def ai_filter(df)，只输出代码。df 按交易日升序，
+        包含 open、high、low、close。模板统计值（百分数）：{tags}。
+        日收益率波动率使用 np.std(np.diff(close) / close[:-1])。
+        区间涨跌幅为 close[-1] / close[0] - 1。
+        区间振幅为 (max(high) - min(low)) / mean(close)。
+        最大回撤为 max(1 - close / np.maximum.accumulate(close))。
+        百分数先除以 100。分别判断四项是否在允许偏差内，统计达标项数。
+        四项中至少两项达标时返回 True，否则返回 False。单项超出容差时继续判断其他项。
+        每项允许的绝对偏差为 max(abs(模板值) * 0.40, 0.005)。
+        涨跌幅和其他三项使用同一容差公式，不另加涨跌方向或其他筛选条件。
+        数据不足或非有限值时返回 False。需要的库在函数内导入。
+        """
+
     try:
         # 调用 deepseek-coder 模型
         response = client.chat.completions.create(
@@ -90,10 +106,21 @@ def generate_ai_filter(tags, custom_prompt):
         print(f"📝 [DeepSeek 实时生成的过滤代码]:\n{code_str}\n" + "-" * 40)
 
         # 4. 动态编译为 Python 函数
-        local_env = {}
-        exec(code_str, globals(), local_env)
-        return local_env['ai_filter']
+        return compile_ai_filter(code_str)
 
     except Exception as e:
+        if strict or raise_on_failure:
+            raise RuntimeError("DeepSeek 粗筛函数生成失败") from e
         print(f"❌ [DeepSeek] 代码生成或编译失败: {e}")
         return lambda df: True  # 兜底逻辑：如果 AI 写错代码报错了，直接返回 True 保证程序不崩溃
+
+
+
+def compile_ai_filter(source):
+    namespace = {}
+    exec(source, namespace)
+    filter_func = namespace['ai_filter']
+    if not callable(filter_func):
+        raise TypeError("ai_filter 必须是可调用函数")
+    filter_func.source = source
+    return filter_func

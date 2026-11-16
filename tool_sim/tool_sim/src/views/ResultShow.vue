@@ -290,13 +290,7 @@ const isHistorySearchNew = computed(() => {
   return store.state.baseInfo.isHistorySearchNew === true;
 });
 const graphCode = ref('000021');
-const filterStats = ref(null);
-watch(() => store.state.resultInfo, (newVal) => {
-  if (newVal && newVal.filter_stats) {
-    filterStats.value = newVal.filter_stats;
-    console.log("漏斗数据成功更新:", filterStats.value);
-  }
-}, { deep: true, immediate: true });
+const filterStats = computed(() => store.state.resultInfo?.filter_stats || null);
 watch(() => store.state.resultStockInfo.code,(newValue) => {
   console.log("----------------------------------");
   console.log(store.state.resultStockInfo.startDate);
@@ -494,9 +488,8 @@ watch(() => store.state.resultInfo.filter_stats, (val) => {
 }, { immediate: true });
 
 // 监听vuex中的sim_stock_list,更新dataObjects3的数据
-watch(() => store.state.sim_stock_list, async(newList) => {
+watch(() => store.state.sim_stock_list, (newList) => {
   console.log("------- ResultShow 监听到新结果，开始准备表格数据 -------", newList?.length);
-  await fetchImages();
 
   if (newList && newList.length > 0) {
     // 将数据映射到 dataObjects3，这是 tableData2 的来源
@@ -531,8 +524,12 @@ watch(() => store.state.sim_stock_list, async(newList) => {
     });
 
     console.log("dataObjects3 赋值成功，当前长度:", dataObjects3.value.length);
-    // 如果后端把 filter_stats 存到了 Vuex 的 resultInfo 里
-    filterStats.value = store.state.resultInfo?.filter_stats || null;
+    const displayedRows = dataObjects3.value;
+    fetchImages().then(() => {
+      if (dataObjects3.value === displayedRows) {
+        displayedRows.forEach(row => { row.imagePath = curImg.value; });
+      }
+    });
     nextTick(() => {
       // 触发图表渲染
       dataObjects3.value.forEach((item, rowIndex) => {

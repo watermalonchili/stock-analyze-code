@@ -91,7 +91,7 @@
                 <div style="margin-top: 10px; margin-left: -3px;">
                   <div style="margin-top: 10px">
                     <el-button plain @click="dialogVisible = true" class="custom-button btn-search-range" style="margin-top: 0px; width: 270px; margin-left: -5px; font-size: 12px;">
-                      请选择待查找股票集（默认为全部）
+                      请选择待查找股票集（{{ tableDataRecent.length }} 只）
                     </el-button>
 <!--                    <DialogChoose2 :visible="dialogVisible" @close="dialogVisible = false" />-->
                     <el-table :data="tableDataRecent" class="scrollable-div" :max-height="tableDataRecent.length > 0 ? 180 : 100" style="margin-left: 8px; margin-top: 10px; border-radius: 10px; width: 280px; margin-bottom: 10px;" border>
@@ -225,7 +225,7 @@
                 <hr style="margin-top:20px; margin-bottom: 0px;"/>
 
                 <!-- 底部结果展示区 -->
-                <ResultShow v-if="resultType" :key="store.state.sim_stock_list.length + new Date().getTime()" />
+                <ResultShow v-if="resultType" />
 
                 <!-- ====== 特征提取与查找弹窗 ====== -->
                 <el-dialog v-model="featureDialogVisible" :title="analysisMode === 'MA' ? '均线形态特征提取' : 'K线骨架与语义特征提取'" width="650px" :append-to-body="false" top="130px" destroy-on-close @opened="renderDialogChart">
@@ -264,7 +264,7 @@
                               <div @click.stop.prevent>
                                 <el-input-number
                                     v-model="feat.value"
-                                    :min="0" :step="feat.unit === '%' ? 1 : 1"
+                                    :min="feat.key === 'trend' ? -100 : 0" :step="feat.unit === '%' ? 1 : 1"
                                     size="small"
                                     controls-position="right"
                                     style="width: 85px;"
@@ -606,6 +606,7 @@ import * as echarts from "echarts";
 import { nextTick, ref, watch, computed, reactive, onMounted, toRaw } from "vue";
 import axios from "axios";
 import { useStore } from "vuex";
+import { DEFAULT_SEARCH_START, DEFAULT_SEARCH_END } from "@/store";
 import { StarFilled, Star, DataAnalysis, List, VideoPlay, CopyDocument, Search, Picture, CollectionTag, Filter, MagicStick, Close } from '@element-plus/icons-vue';
 import html2canvas from 'html2canvas';
 import { ElMessageBox, ElMessage } from 'element-plus';
@@ -639,6 +640,20 @@ const maList = ref(["MA4", "MA8", "MA12", "MA16", "MA20", "MA47"]);
 // ==================== Vuex Store 快捷引用 ====================
 const modeInfo = store.state.modeInfo;
 const searchInfo = store.state.searchInfo;
+let defaultPoolRequest;
+
+const loadDefaultSearchPool = async () => {
+  const initialPool = searchInfo.stockList;
+  try {
+    const { data } = await axios.get(`${API_BASE_URL}/api/default_search_stock_pool`);
+    const knownStocks = new Map(store.state.stockList.map(stock => [stock.code, stock]));
+    if (searchInfo.stockList === initialPool) {
+      searchInfo.stockList = data.stock_pool.map(code => knownStocks.get(code) || { code, name: code });
+    }
+  } catch (err) {
+    ElMessage.warning(err.response?.data?.error || '无法加载默认的 1000 只股票，当前使用已有股票池');
+  }
+};
 
 
 // ==================== 股票信息与展示 ====================
@@ -678,7 +693,7 @@ const toggleFavorite = () => {
 const searchQuery = ref("");
 const activeName1 = ref("near");
 const dialogVisible = ref(false);
-const tableDataRecent = ref([]);
+const tableDataRecent = computed(() => store.state.searchInfo.stockList);
 const sidebarWidth = ref(290);
 const selectedDatePreset = ref(null);
 
@@ -744,8 +759,8 @@ function formatDateToLocal(date) {
 
 function handleDateChange2(val) {
   if (!val || val.length !== 2) {
-    searchInfo.searchStartDate = null;
-    searchInfo.searchEndDate = null;
+    searchInfo.searchStartDate = DEFAULT_SEARCH_START;
+    searchInfo.searchEndDate = DEFAULT_SEARCH_END;
     newStartDate.value = null;
     newEndDate.value = null;
     return;
@@ -858,7 +873,7 @@ let dialogChartInstance = null;
 const extractedSegmentData = ref([]);
 let updateGraphicPoints = null;
 
-const openFeatureDialog = () => {
+const openFeatureDialog = async () => {
   if (!activeBrushData.value || !graphRef.value) {
     ElMessage.warning('请先在图表上框选一段均线片段');
     return;
@@ -902,7 +917,7 @@ const openFeatureDialog = () => {
   }
 
   extractedFeatures.value = { startDate, endDate };
-  dynamicFeatures.value = autoFeats;
+  if (!(await loadSearchSegmentFeatures())) return;
   customFeatureText.value = '';
   featureDialogVisible.value = true;
 };
@@ -1549,7 +1564,7 @@ function buildHeadShoulderFeatures(r) {
   ];
 }
 
-const confirmSkeletonAndNext = () => {
+const confirmSkeletonAndNext = async () => {
   skeletonDialogVisible.value = false;
 
   store.commit("updateNewSearchInfoProperty", {
@@ -1618,7 +1633,7 @@ const confirmSkeletonAndNext = () => {
 
   const { startDate, endDate } = activeBrushData.value;
   extractedFeatures.value = { startDate, endDate };
-  dynamicFeatures.value = hsbResult ? buildHeadShoulderFeatures(hsbResult) : autoFeats;
+  if (!(await loadSearchSegmentFeatures())) return;
   customFeatureText.value = '';
   store.commit("updateNewSearchInfoProperty", { key: 'patternType', value: patternType.value });
 
@@ -1641,6 +1656,8 @@ const handleExtract = () => {
 
 // ==================== 搜索配置确认弹窗 ====================
 const searchConfigDialogVisible = ref(false);
+const searchSegmentFeatures = ref([]);
+const searchSegmentTarget = ref(null);
 const configPreviewChartRef = ref(null);
 let configPreviewChartInstance = null;
 
@@ -1706,12 +1723,37 @@ const confirmAiFeatures = () => {
   ElMessage.success(`已引入 ${selected.length} 条 AI 解析特征`);
 };
 
+const loadSearchSegmentFeatures = async () => {
+  const { startDate, endDate } = activeBrushData.value;
+  const target = {
+    target_code: graphCode1.value,
+    target_start_date: startDate,
+    target_end_date: endDate
+  };
+  try {
+    const { data } = await axios.post(`${API_BASE_URL}/api/search_segment_features`, target);
+    searchSegmentFeatures.value = data.features.map(feature => ({
+      ...feature, defaultValue: feature.value
+    }));
+    searchSegmentTarget.value = target;
+    dynamicFeatures.value = searchSegmentFeatures.value.map(feature => ({
+      ...feature, desc: feature.label, hasValue: true, weight: 1, selected: true
+    }));
+    return true;
+  } catch (err) {
+    ElMessage.error(err.response?.data?.error || '后端生成默认特征失败');
+    return false;
+  }
+};
+
 const confirmFeatureAndSearch = () => {
+  if (!searchSegmentTarget.value) return;
+  const { target_start_date: startDate, target_end_date: endDate } = searchSegmentTarget.value;
+  resetWindowScale();
   featureDialogVisible.value = false;
   skeletonDialogVisible.value = false;
 
   const timestamp = new Date().getTime();
-  const { startDate, endDate } = activeBrushData.value;
   saveCurrentBrushInternal(timestamp, startDate, endDate);
 
   const finalFeatures = dynamicFeatures.value.filter(f => f.selected).map(f => {
@@ -1730,7 +1772,6 @@ const confirmFeatureAndSearch = () => {
     value: { auto: finalFeatures, custom: customFeatureText.value }
   });
 
-  resetWindowScale();
   searchConfigDialogVisible.value = true;
   ElMessage.success('形态特征已保存，请确认检索范围和股票池');
 };
@@ -1874,14 +1915,30 @@ const saveCurrentBrushInternal = (timestamp, startDate, endDate) => {
 
 
 // ==================== 搜索执行 ====================
+let searchInProgress = false;
 const executeFinalSearch = async () => {
-  searchConfigDialogVisible.value = false;
-  currentStep.value = 2;
-  await fetchImages();
-  await doResultWithLLM();
+  await defaultPoolRequest;
+  if (!searchSegmentTarget.value) return;
+  const editableFeatures = dynamicFeatures.value.filter(feature => feature.key);
+  if (editableFeatures.some(feature => !Number.isFinite(feature.value))) {
+    ElMessage.warning('请填写有效的特征数值');
+    return;
+  }
+  const featureOverrides = Object.fromEntries(editableFeatures
+    .filter(feature => feature.value !== feature.defaultValue)
+    .map(feature => [feature.key, feature.value]));
+  if (searchInProgress) return;
+  searchInProgress = true;
+  try {
+    searchConfigDialogVisible.value = false;
+    currentStep.value = 2;
+    await doResultWithLLM(featureOverrides);
+  } finally {
+    searchInProgress = false;
+  }
 };
 
-const doResultWithLLM = async () => {
+const doResultWithLLM = async (featureOverrides) => {
   console.log("准备触发搜索，当前 Vuex 状态:", store.state.baseInfo);
 
   let result = store.state.searchInfo.stockList.map(item => item.code);
@@ -1906,8 +1963,8 @@ const doResultWithLLM = async () => {
   if (searchStart instanceof Date) searchStart = formatDateToLocal(searchStart);
   if (searchEnd instanceof Date) searchEnd = formatDateToLocal(searchEnd);
 
-  if (!searchStart || searchStart === '--') searchStart = '2016-01-01';
-  if (!searchEnd || searchEnd === '--') searchEnd = '2024-12-31';
+  if (!searchStart || searchStart === '--') searchStart = DEFAULT_SEARCH_START;
+  if (!searchEnd || searchEnd === '--') searchEnd = DEFAULT_SEARCH_END;
 
   store.commit("updateNewSearchInfo", {
     savedBrushTimeRanges: finalBrushRanges,
@@ -1915,7 +1972,7 @@ const doResultWithLLM = async () => {
     lines: maNumbers,
   });
 
-  store.state.newSearchInfo.analysisMode = analysisMode.value;
+  store.state.newSearchInfo.analysisMode = 'KLINE';
 
   store.commit("updateBaseInfo", {
     isMode: true, isStock: false, currentFunction: "推荐模式查找",
@@ -1923,37 +1980,22 @@ const doResultWithLLM = async () => {
     isHistorySearchNew: true
   });
 
-  const updatedTarget = toRaw(store.state.newSearchInfo);
-  resultType.value = true;
-  const timestamp = new Date().getTime();
-
   const llmLoading = ElMessage({
-    message: '大语言模型正在解析语义标签，生成滑窗过滤规则...',
+    message: '后端正在分析框选片段并查找相似行情...',
     type: 'warning', duration: 0,
   });
 
   try {
-    const semanticFeatures = updatedTarget.extractedFeatures || { auto: [], custom: '' };
-
     const requestParams = {
-      target_code: updatedTarget.savedBrushTimeRanges[0].code,
-      target_start_date: updatedTarget.savedBrushTimeRanges[0].startDate,
-      target_end_date: updatedTarget.savedBrushTimeRanges[0].endDate,
+      ...searchSegmentTarget.value,
       search_start_date: searchStart,
       search_end_date: searchEnd,
-      ma_list: updatedTarget.lines,
       stock_pool: result,
-      analysis_mode: updatedTarget.analysisMode || 'MA',
-      window_size: windowDays.value || undefined,
-      custom_skeleton: updatedTarget.customSkeleton || [],
-      semantic_features: {
-        tags: semanticFeatures.auto,
-        custom_prompt: semanticFeatures.custom
-      }
+      ...(Object.keys(featureOverrides).length ? { feature_overrides: featureOverrides } : {})
     };
 
     const response = await axios.post(
-        `${API_BASE_URL}/find_similar_stocks_llm?timestamp=${timestamp}`,
+        `${API_BASE_URL}/find_similar_stocks_llm`,
         requestParams,
         { headers: { 'Content-Type': 'application/json' } }
     );
@@ -1990,15 +2032,17 @@ const doResultWithLLM = async () => {
         filter_stats: response.data.filter_stats,
       });
 
+      resultType.value = true;
       currentStep.value = 3;
       ElMessage.success(`历史语义检索完成！在 ${searchStart} 至 ${searchEnd} 期间共找到 ${response.data.result.length} 个匹配片段。`);
       return { success: true, data: response.data };
     }
   } catch (err) {
-    console.error("前端报错:", err);
+    console.error("相似性查找失败:", err);
     llmLoading.close();
-    ElMessage.error('检索失败，请检查控制台报错信息');
-    return { success: false, message: '网络请求错误' };
+    const message = err.response?.data?.error || err.message || '相似性查找失败';
+    ElMessage.error(message);
+    return { success: false, message };
   }
 };
 
@@ -2315,9 +2359,6 @@ watch(searchInfo, (newVal) => {
     newVal.searchStartDate ? new Date(newVal.searchStartDate) : null,
     newVal.searchEndDate ? new Date(newVal.searchEndDate) : null
   ];
-  if (baseInfo.isHistory === false) {
-    tableDataRecent.value = newVal.stockList;
-  }
 });
 
 watch(() => store.state.newSearchInfo, (newVal) => {
@@ -2372,6 +2413,7 @@ watch(sidebarWidth, () => {
 
 // ==================== 生命周期 ====================
 onMounted(() => {
+  defaultPoolRequest = loadDefaultSearchPool();
   fetchImages();
 });
 

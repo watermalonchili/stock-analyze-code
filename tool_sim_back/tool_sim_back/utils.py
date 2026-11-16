@@ -1,16 +1,10 @@
 ########## 数据处理工具 ##########
-import tushare as ts
 import pandas as pd
 from datetime import timedelta, datetime
 import numpy as np
-from config import Config
 import os
 import json
 
-# 设置Tushare的token
-ts.set_token(Config.TUSHARE_TOKEN)
-pro = ts.pro_api()
-    
 # 替换get_stock_data和get_stock_data1为CSV读取逻辑，保留日期格式差异处理
 def get_stock_data(ts_code, start_date, end_date, data_folder=None):
     """

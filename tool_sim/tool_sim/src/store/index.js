@@ -1,8 +1,12 @@
 import { createStore } from 'vuex';
 import axios from "axios";
 
-const store = createStore({
-    state: {
+// 默认扫描本地五年行情的完整区间。
+export const DEFAULT_SEARCH_START = '2020-01-01';
+export const DEFAULT_SEARCH_END = '2024-12-31';
+
+function createInitialState() {
+    const state = {
         resultJson : null,
 
         sim_stock_list:[], // 模式相似股票列表
@@ -81,8 +85,8 @@ const store = createStore({
 
         // 【用户设置查找的范围】当前查找范围的信息
         searchInfo:{
-            searchStartDate: '--',
-            searchEndDate: '--',
+            searchStartDate: DEFAULT_SEARCH_START,
+            searchEndDate: DEFAULT_SEARCH_END,
             stockList:[],
         },
 
@@ -1808,7 +1812,16 @@ const store = createStore({
         //     }
         // ],
         modeListSelf: [], // 初始化为空数组
-    },
+    };
+    state.searchInfo.stockList = [
+        ...state.stockList.filter(stock => stock.isSelected),
+        ...state.stockList.filter(stock => !stock.isSelected),
+    ].slice(0, 100);
+    return state;
+}
+
+const store = createStore({
+    state: createInitialState,
 
     // 用于修改 state 的方法，必须是同步的
     mutations: {

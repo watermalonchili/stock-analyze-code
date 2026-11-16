@@ -110,7 +110,6 @@ def get_stock_data_from_csv(code, start_date=None, end_date=None, data_folder=No
                 end = pd.to_datetime(end_date)
                 mask = (df_sorted['trade_date'] >= start) & (df_sorted['trade_date'] <= end)
                 filtered_df = df_sorted.loc[mask].reset_index(drop=True)
-                print(f"股票 {code} 在指定期间共找到 {len(filtered_df)} 条数据")
                 return filtered_df, stock_name
             except Exception as e:
                 print(f"筛选 {code} 时间范围时出错: {e}")

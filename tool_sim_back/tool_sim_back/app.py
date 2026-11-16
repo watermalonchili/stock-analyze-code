@@ -1,3 +1,6 @@
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from multiprocessing import get_context
+from threading import Lock
 import json
 import shutil
 from skeleton_learner import SkeletonLearner
@@ -1609,6 +1612,33 @@ def _compute_segment_features(raw_data):
     }
 
 
+SEARCH_FEATURE_LABELS = {
+    'volatility': '日收益率波动率',
+    'trend': '区间收盘涨跌幅',
+    'amplitude': '区间振幅',
+    'maxDrawdown': '最大回撤',
+}
+
+
+@app.route('/api/search_segment_features', methods=['POST'])
+def search_segment_features():
+    data = request.get_json(silent=True) or {}
+    code = data.get('target_code')
+    start = str(data.get('target_start_date') or '')[:10]
+    end = str(data.get('target_end_date') or '')[:10]
+    if not code or not start or not end:
+        return jsonify({"error": "请提供框选片段的股票代码和起止日期"}), 400
+    ts_code = stock_lookup_code(code)
+    df = get_stock_data(ts_code, start, end, data_folder=_template_data_folder(ts_code, DATA_FOLDER))
+    features = _compute_segment_features(df.to_dict('records')) if df is not None else {}
+    if not features or not all(np.isfinite(features[key]) for key in SEARCH_FEATURE_LABELS):
+        return jsonify({"error": "基准片段至少需要两个有效收盘价"}), 400
+    return jsonify({"features": [
+        {"key": key, "label": label, "value": round(features[key], 2), "unit": "%"}
+        for key, label in SEARCH_FEATURE_LABELS.items()
+    ]})
+
+
 @app.route('/api/calibrate_features', methods=['POST'])
 def calibrate_features():
     """正态分布特征范围校准：μ ± 1.96σ (95% CI) + 负样本截断"""
@@ -1848,6 +1878,181 @@ def train_custom_model():
         return jsonify({"success": False, "msg": str(e)}), 500
 
 # ================= 新增：专门处理大模型语义检索的接口 =================
+def stock_lookup_code(code):
+    code = str(code).strip().upper()
+    if "." in code:
+        return code
+    code = code.zfill(6)
+    exchange = "SH" if code.startswith("6") else "BJ" if code.startswith(("4", "8", "92")) else "SZ"
+    return f"{code}.{exchange}"
+
+
+_LLM_SCAN_POOL = None
+_LLM_SCAN_POOL_LOCK = Lock()
+
+
+def _get_llm_scan_pool():
+    global _LLM_SCAN_POOL
+    with _LLM_SCAN_POOL_LOCK:
+        if _LLM_SCAN_POOL is None:
+            _LLM_SCAN_POOL = ProcessPoolExecutor(max_workers=4, mp_context=get_context("spawn"))
+        return _LLM_SCAN_POOL
+FIVE_YEAR_DATA_FOLDER = os.getenv(
+    'FIVE_YEAR_DATA_FOLDER',
+    os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..',
+                                 'benchmark-data', 'baostock-qfq-2020-2024')),
+)
+
+
+def _five_year_stock_codes():
+    if not os.path.isdir(FIVE_YEAR_DATA_FOLDER):
+        return []
+    return sorted(
+        entry.name[:-4] for entry in os.scandir(FIVE_YEAR_DATA_FOLDER)
+        if entry.is_file() and len(entry.name) == 10
+        and entry.name.endswith('.csv') and entry.name[:-4].isdigit()
+    )[:1000]
+
+
+def _template_data_folder(ts_code, data_folder):
+    filename = ts_code.split('.')[0] + '.csv'
+    if (not os.path.isfile(os.path.join(data_folder, filename))
+            and os.path.isfile(os.path.join(FIVE_YEAR_DATA_FOLDER, filename))):
+        return FIVE_YEAR_DATA_FOLDER
+    return data_folder
+
+
+@app.route('/api/default_search_stock_pool', methods=['GET'])
+def default_search_stock_pool():
+    codes = _five_year_stock_codes()
+    if len(codes) < 1000:
+        return jsonify({"error": "本地五年行情未凑齐 1000 只股票"}), 503
+    return jsonify({"stock_pool": codes})
+
+
+@lru_cache(maxsize=16)
+def _load_scan_filter(source):
+    from llm_agent import compile_ai_filter
+
+    return compile_ai_filter(source)
+
+
+def calc_shape_similarity(df_target, df_window, ma_cols=None):
+    from deal_sim_time_range import unify_series_length
+
+    try:
+        # 多线 Pearson：对每条均线分别算皮尔逊相关系数，再取算术平均
+        if ma_cols is None:
+            ma_cols = [c for c in df_target.columns if c.startswith('MA')]
+        if not ma_cols:
+            ma_cols = ['close']
+        corrs = []
+        for col in ma_cols:
+            if col not in df_target.columns or col not in df_window.columns:
+                continue
+            t = np.asarray(df_target[col].values, dtype=float)
+            w = np.asarray(df_window[col].values, dtype=float)
+            # 窗口长度≠模板长度时（前端滑块可调窗口），先线性插值统一到相同长度再算 Pearson
+            if len(t) != len(w):
+                t, w = unify_series_length(t, w)  # 默认统一到 max(len)：长者不动、短者拉伸
+            mask = ~(np.isnan(t) | np.isnan(w))
+            if mask.sum() < 3:
+                continue
+            t, w = t[mask], w[mask]
+            if np.std(t) < 1e-8 or np.std(w) < 1e-8:
+                continue
+            # Z-score 标准化
+            tn = (t - t.mean()) / (t.std() + 1e-8)
+            wn = (w - w.mean()) / (w.std() + 1e-8)
+            corr = np.corrcoef(tn, wn)[0, 1]
+            corrs.append(0.0 if np.isnan(corr) else float(corr))
+        return float(np.mean(corrs)) if corrs else 0.0
+    except Exception:
+        return 0.0
+
+# ==========================================
+# 🌟 算法2：K线骨架相似度 (DTW 动态时间弯曲)
+# ==========================================
+def calc_kline_dtw_similarity(target_seq, df_window):
+    # 统一 Z-score 归一化的 DTW（与 realtime_scan / analyze_stock_history 一致）
+    try:
+        return _dtw_similarity(target_seq, df_window['close'].values)
+    except Exception as e:
+        print("DTW 计算出错:", e)
+        return 0.0
+
+def _scan_llm_stock(code, *, context):
+    (data_folder, use_five_year_data, search_start_date, search_end_date,
+     window_size, step_size, ma_list, analysis_mode, target_for_sim, target_df,
+     ma_cols, target_skeleton_count, cutoff, filter_source) = context
+    filter_func = _load_scan_filter(filter_source) if filter_source else None
+    results = []
+    stats = {"total": 0, "after_llm_filter": 0, "after_similarity_filter": 0}
+    ts_code = stock_lookup_code(code)
+    candidate_folder = data_folder
+    candidate_file = ts_code.split('.')[0] + '.csv'
+    if use_five_year_data and os.path.isfile(os.path.join(FIVE_YEAR_DATA_FOLDER, candidate_file)):
+        candidate_folder = FIVE_YEAR_DATA_FOLDER
+    df = get_stock_data(ts_code, search_start_date, search_end_date, data_folder=candidate_folder)
+
+    if df is None or df.empty or len(df) < window_size:
+        return results, stats
+    if ma_list:
+        df = calculate_ma(df, ma_list)
+    if df.empty:
+        return results, stats
+    df['trade_date'] = pd.to_datetime(df['trade_date']).dt.strftime('%Y-%m-%d')
+
+    # 滑动窗口
+    for i in range(0, len(df) - window_size + 1, step_size):
+        window_df = df.iloc[i: i + window_size].copy()
+        stats["total"] += 1  # 计数：所有片段
+        # 第一关：AI 大模型语义过滤剪枝
+        if filter_func is not None and not filter_func(window_df.copy()):
+            stats["after_llm_filter"] += 1  # 计数：AI过滤的片段
+            continue
+            # 第二关：根据模式，分发给不同的底层数学引擎
+        if analysis_mode == 'KLINE':
+            # K 线模式 -> 走 DTW 算法（目标用骨架插值序列，兜底用收盘价）
+            sim_score = calc_kline_dtw_similarity(target_for_sim, window_df)
+        else:
+            # 均线模式 -> 走 皮尔逊 算法
+            sim_score = calc_shape_similarity(target_df, window_df, ma_cols)
+
+        start_dt = window_df.iloc[0]['trade_date']
+        end_dt = window_df.iloc[-1]['trade_date']
+
+        # 相似度阈值
+        if sim_score > cutoff:
+            # 新增：骨架节点数筛选（仅 KLINE 且目标有骨架时）
+            candidate_skeleton_count = -1
+            if analysis_mode == 'KLINE' and target_skeleton_count > 0:
+                try:
+                    w = window_df.copy()
+                    w['trade_date'] = pd.to_datetime(w['trade_date'])
+                    candidate_skeleton_count = len(_extract_skeleton_points(w))
+                except Exception as e:
+                    print(f"    ⚠️ 骨架提取失败 {code}: {e}")
+                    candidate_skeleton_count = -1
+                if candidate_skeleton_count != target_skeleton_count:
+                    # print(f"    🔍 [节点数不符] {code} 目标{target_skeleton_count} vs 候选{candidate_skeleton_count}，剔除")
+                    continue
+
+            stats["after_similarity_filter"] += 1  # 【修复】：在这里加计数！
+            results.append({
+                "stock_code": code,
+                "stock_name": code,
+                "similarity": round(sim_score, 4),
+                "recent_data": window_df.to_dict('records'),
+                "ma_list": ma_list,
+                "target_skeleton_count": target_skeleton_count,
+                "candidate_skeleton_count": candidate_skeleton_count,
+            })
+    results.sort(key=lambda row: row['similarity'], reverse=True)
+    return results[:50], stats
+
+
+
 CORS(app, resources={r"/find_similar_stocks_llm": {
     "origins": Config.CORS_ORIGINS,
     "methods": ["POST", "OPTIONS"],
@@ -1856,21 +2061,18 @@ CORS(app, resources={r"/find_similar_stocks_llm": {
 }})
 @app.route('/find_similar_stocks_llm', methods=['POST'])
 def handle_find_similar_stocks_llm():
+    request_started = time.perf_counter()
     try:
         data = request.get_json(force=True)
 
-        # 1. 提取大模型专属的语义参数并生成代码
-        semantic_features = data.get('semantic_features', {})
-        tags = semantic_features.get('tags', [])
-        custom_prompt = semantic_features.get('custom_prompt', "")
-
-        print("\n" + "🚀" * 20)
-        print(f"🤖 [AI 智能体已接管请求] 正在解析多模态语义特征...")
-
-        from llm_agent import generate_ai_filter
-        ai_filter_func = generate_ai_filter(tags, custom_prompt)
-
-        print("🚀" * 20 + "\n")
+        semantic_features = data.get('semantic_features')
+        backend_only = semantic_features is None or 'dtw_threshold' in data
+        try:
+            threshold = float(data.get('dtw_threshold', 0.8))
+        except (TypeError, ValueError):
+            return jsonify({"error": "dtw_threshold 必须是 0 到 1 之间的数字"}), 400
+        if not 0 <= threshold <= 1:
+            return jsonify({"error": "dtw_threshold 必须是 0 到 1 之间的数字"}), 400
 
         # 2. 提取【基准片段】和【历史扫描区间】参数
         target_code = data.get('target_code', '')
@@ -1881,8 +2083,13 @@ def handle_find_similar_stocks_llm():
         search_end_date = str(data.get('search_end_date', '2024-12-31'))[:10]
 
         stock_pool = data.get('stock_pool', [])
-        ma_list = data.get('ma_list', [4, 8, 12, 16, 20, 47])
+        ma_list = [] if backend_only else data.get('ma_list', [4, 8, 12, 16, 20, 47])
         data_folder = data.get('data_folder', DATA_FOLDER)
+        use_five_year_data = (
+            'data_folder' not in data
+            and search_start_date >= '2020-01-01'
+            and search_end_date <= '2024-12-31'
+        )
 
         print(f"🔎[历史回测模式开启] 全局扫描区间: {search_start_date} 至 {search_end_date}")
 
@@ -1891,20 +2098,25 @@ def handle_find_similar_stocks_llm():
         # ==========================================
         # 【核心新增1】：获取你画框的基准数据，并动态确定窗口大小
         # ==========================================
-        ts_target_code = f"{target_code}.SH" if str(target_code).startswith('6') else f"{target_code}.SZ"
+        ts_target_code = stock_lookup_code(target_code)
+        target_folder = (data_folder if 'data_folder' in data
+                         else _template_data_folder(ts_target_code, data_folder))
 
         # 【修复】：计算前置缓冲期 (往前推 100 天，确保连半年线 MA120 都能算出来)
         dt_target_start = pd.to_datetime(target_start_date)
-        padded_start_date = (dt_target_start - pd.Timedelta(days=100)).strftime('%Y-%m-%d')
+        padded_start_date = target_start_date if backend_only else (
+            dt_target_start - pd.Timedelta(days=100)
+        ).strftime('%Y-%m-%d')
 
         # 1. 先用带缓冲期的时间去获取长周期数据
-        target_df_full = get_stock_data(ts_target_code, padded_start_date, target_end_date, data_folder=data_folder)
+        target_df_full = get_stock_data(ts_target_code, padded_start_date, target_end_date, data_folder=target_folder)
 
         if target_df_full is None or target_df_full.empty:
             return jsonify({"error": "无法获取基准片段数据，请重新框选"}), 400
 
         # 2. 在长周期数据上计算所有的 MA 均线（此时不会产生全是 NaN 的情况了）
-        target_df_full = calculate_ma(target_df_full, ma_list)
+        if ma_list:
+            target_df_full = calculate_ma(target_df_full, ma_list)
 
         # 3. 均线算完后，用 Pandas 切片把时间精确卡回用户在前端实际框选的范围！
         target_df_full['trade_date_dt'] = pd.to_datetime(target_df_full['trade_date'])
@@ -1914,18 +2126,47 @@ def handle_find_similar_stocks_llm():
             ].copy()
 
         if target_df.empty:
-            return jsonify({"error": "基准片段均线计算后数据为空，请尝试框选更长的时间"}), 400
+            return jsonify({"error": "基准片段数据为空，请尝试框选更长的时间"}), 400
+
+        from llm_agent import generate_ai_filter
+        if backend_only:
+            features = _compute_segment_features(target_df.to_dict('records'))
+            if not features:
+                return jsonify({"error": "基准片段至少需要两个有效收盘价"}), 400
+            labels = SEARCH_FEATURE_LABELS
+            overrides = data.get('feature_overrides', {})
+            if not isinstance(overrides, dict) or overrides.keys() - labels.keys():
+                return jsonify({"error": "特征修改包含不支持的字段"}), 400
+            for key, value in overrides.items():
+                if (type(value) not in (int, float) or not np.isfinite(value)
+                        or (key != 'trend' and value < 0)):
+                    return jsonify({"error": f"{labels[key]}的修改值无效"}), 400
+                features[key] = value
+            tags = [f"{label} {features[key]:.2f}%" for key, label in labels.items()]
+            try:
+                model_filter = generate_ai_filter(tags, "", strict=True)
+            except RuntimeError as exc:
+                return jsonify({"error": str(exc)}), 502
+
+        else:
+            try:
+                model_filter = generate_ai_filter(
+                    semantic_features.get('tags', []), semantic_features.get('custom_prompt', ''),
+                    raise_on_failure=True,
+                )
+            except RuntimeError as exc:
+                return jsonify({"error": str(exc)}), 502
 
         # 动态设定窗口大小：优先用前端滑块传来的 window_size，未传/非法则回退为实际框选天数
         try:
-            requested_window_size = int(data.get('window_size') or 0)
+            requested_window_size = 0 if backend_only else int(data.get('window_size') or 0)
         except (TypeError, ValueError):
             requested_window_size = 0
         if requested_window_size > 0:
             window_size = max(5, min(250, requested_window_size))  # 夹取到合法范围 [5, 250]
         else:
             window_size = len(target_df)
-        step_size = 3  # 步长设小一点，搜得更细致
+        step_size = max(1, min(10, round(window_size * 0.10)))
 
         window_src = f"（前端滑块指定: {requested_window_size}）" if requested_window_size > 0 else "（未指定，使用框选长度）"
         print(f"🎯 基准片段确立: {target_code} ({target_start_date} 至 {target_end_date}), 窗口大小: {window_size}天{window_src}")
@@ -1939,188 +2180,77 @@ def handle_find_similar_stocks_llm():
         # ==========================================
         # 优化后：基于单线（Close 或 核心主图线）的形态相似度
         # ==========================================
-        from deal_sim_time_range import unify_series_length  # 不等长窗口的均线序列对齐（线性插值）
-
-        def calc_shape_similarity(df_target, df_window, ma_cols=None):
-            try:
-                # 多线 Pearson：对每条均线分别算皮尔逊相关系数，再取算术平均
-                if ma_cols is None:
-                    ma_cols = [c for c in df_target.columns if c.startswith('MA')]
-                if not ma_cols:
-                    ma_cols = ['close']
-                corrs = []
-                for col in ma_cols:
-                    if col not in df_target.columns or col not in df_window.columns:
-                        continue
-                    t = np.asarray(df_target[col].values, dtype=float)
-                    w = np.asarray(df_window[col].values, dtype=float)
-                    # 窗口长度≠模板长度时（前端滑块可调窗口），先线性插值统一到相同长度再算 Pearson
-                    if len(t) != len(w):
-                        t, w = unify_series_length(t, w)  # 默认统一到 max(len)：长者不动、短者拉伸
-                    mask = ~(np.isnan(t) | np.isnan(w))
-                    if mask.sum() < 3:
-                        continue
-                    t, w = t[mask], w[mask]
-                    if np.std(t) < 1e-8 or np.std(w) < 1e-8:
-                        continue
-                    # Z-score 标准化
-                    tn = (t - t.mean()) / (t.std() + 1e-8)
-                    wn = (w - w.mean()) / (w.std() + 1e-8)
-                    corr = np.corrcoef(tn, wn)[0, 1]
-                    corrs.append(0.0 if np.isnan(corr) else float(corr))
-                return float(np.mean(corrs)) if corrs else 0.0
-            except Exception:
-                return 0.0
-
-        # ==========================================
-        # 🌟 算法2：K线骨架相似度 (DTW 动态时间弯曲)
-        # ==========================================
-        def calc_kline_dtw_similarity(target_seq, df_window):
-            # 统一 Z-score 归一化的 DTW（与 realtime_scan / analyze_stock_history 一致）
-            try:
-                return _dtw_similarity(target_seq, df_window['close'].values)
-            except Exception as e:
-                print("DTW 计算出错:", e)
-                return 0.0
-
-        results = []
         # 获取前端传来的分析模式
-        analysis_mode = data.get('analysis_mode', 'MA')
-        custom_skeleton = data.get('custom_skeleton', []) or []
+        analysis_mode = 'KLINE' if backend_only else data.get('analysis_mode', 'MA')
+        custom_skeleton = [] if backend_only else (data.get('custom_skeleton') or [])
         target_skeleton_count = len(custom_skeleton) if custom_skeleton else 0
+        if backend_only:
+            target_skeleton_count = len(_extract_skeleton_points(
+                target_df.assign(trade_date=target_df['trade_date_dt'])
+            ))
+            if target_skeleton_count < 2:
+                return jsonify({"error": "框选片段无法提取有效骨架，请重新框选"}), 400
         # K线模式：用用户确认的骨架插值作为目标序列
         target_seq_kline = None
-        if analysis_mode == 'KLINE' and target_skeleton_count >= 2:
+        if analysis_mode == 'KLINE' and len(custom_skeleton) >= 2:
             target_seq_kline = _skeleton_to_target(custom_skeleton, window_size)
             print(f"🎯 [目标骨架] {target_skeleton_count} 个节点 → 插值成 {window_size} 点目标序列")
-        # 【新增】：初始化三个计数器
-        stats = {"total": 0, "after_llm_filter": 0, "after_similarity_filter": 0}
-        # 3. 开启真正的历史滑动窗口扫描
-        for code in stock_pool:
-            ts_code = f"{code}.SH" if str(code).startswith('6') else f"{code}.SZ"
-            df = get_stock_data(ts_code, search_start_date, search_end_date, data_folder=data_folder)
+        target_for_sim = target_seq_kline if target_seq_kline is not None else target_df['close'].values
+        context = (
+            data_folder, use_five_year_data, search_start_date, search_end_date,
+            window_size, step_size, ma_list, analysis_mode, target_for_sim,
+            target_df if analysis_mode != 'KLINE' else None, ma_cols,
+            target_skeleton_count, threshold, getattr(model_filter, 'source', None),
+        )
 
-            if df is None or df.empty or len(df) < window_size: continue
-            df = calculate_ma(df, ma_list)
-            if df.empty: continue
-            df['trade_date'] = pd.to_datetime(df['trade_date']).dt.strftime('%Y-%m-%d')
+        def scan_pool():
+            results = []
+            stats = {"total": 0, "after_llm_filter": 0, "after_similarity_filter": 0}
+            total_stocks = len(stock_pool)
+            print(f"股票池进度 0/{total_stocks}", flush=True)
+            if not total_stocks:
+                return results, stats
+            report_every = min(100, (total_stocks + 9) // 10)
+            pool = _get_llm_scan_pool()
+            futures = {
+                pool.submit(_scan_llm_stock, code, context=context): index
+                for index, code in enumerate(stock_pool)
+            }
+            for completed, future in enumerate(as_completed(futures), start=1):
+                rows, counts = future.result()
+                for key in stats:
+                    stats[key] += counts[key]
+                # 完成顺序会变化，同分时仍按股票池顺序排列。
+                results.extend((futures[future], row) for row in rows)
+                results.sort(key=lambda item: (-item[1]['similarity'], item[0]))
+                del results[50:]
+                if completed % report_every == 0 or completed == total_stocks:
+                    print(f"股票池进度 {completed}/{total_stocks}", flush=True)
+            return [row for _, row in results], stats
 
-            # 滑动窗口
-            for i in range(0, len(df) - window_size + 1, step_size):
-                window_df = df.iloc[i: i + window_size].copy()
-                stats["total"] += 1  # 计数：所有片段
-                # 第一关：AI 大模型语义过滤剪枝
-                if ai_filter_func is not None and not ai_filter_func(window_df):
-                    stats["after_llm_filter"] += 1  # 计数：AI过滤的片段
-                    continue
-                    # 第二关：根据模式，分发给不同的底层数学引擎
-                if analysis_mode == 'KLINE':
-                    # K 线模式 -> 走 DTW 算法（目标用骨架插值序列，兜底用收盘价）
-                    target_for_sim = target_seq_kline if target_seq_kline is not None else target_df['close'].values
-                    sim_score = calc_kline_dtw_similarity(target_for_sim, window_df)
-                else:
-                    # 均线模式 -> 走 皮尔逊 算法
-                    sim_score = calc_shape_similarity(target_df, window_df, ma_cols)
+        scan_started = time.perf_counter()
+        results, stats = scan_pool()
 
-                start_dt = window_df.iloc[0]['trade_date']
-                end_dt = window_df.iloc[-1]['trade_date']
-
-                # 相似度阈值
-                if sim_score > 0.6:
-                    # 新增：骨架节点数筛选（仅 KLINE 且目标有骨架时）
-                    candidate_skeleton_count = -1
-                    if analysis_mode == 'KLINE' and target_skeleton_count > 0:
-                        try:
-                            w = window_df.copy()
-                            w['trade_date'] = pd.to_datetime(w['trade_date'])
-                            candidate_skeleton_count = len(_extract_skeleton_points(w))
-                        except Exception as e:
-                            print(f"    ⚠️ 骨架提取失败 {code}: {e}")
-                            candidate_skeleton_count = -1
-                        if candidate_skeleton_count != target_skeleton_count:
-                            print(f"    🔍 [节点数不符] {code} 目标{target_skeleton_count} vs 候选{candidate_skeleton_count}，剔除")
-                            continue
-
-                    stats["after_similarity_filter"] += 1  # 【修复】：在这里加计数！
-                    mode_str = "K线DTW" if analysis_mode == 'KLINE' else "均线Pearson"
-                    print(
-                        f"    ✨ [命中] {code} ({start_dt} 至 {end_dt}) | AI逻辑: 通过 | {mode_str}相似度: {sim_score:.4f}")
-
-                    results.append({
-                        "stock_code": code,
-                        "stock_name": code,
-                        "similarity": round(sim_score, 4),
-                        "recent_data": window_df.to_dict('records'),
-                        "ma_list": ma_list,
-                        "target_skeleton_count": target_skeleton_count,
-                        "candidate_skeleton_count": candidate_skeleton_count,
-                    })
-                else:
-                    # 如果逻辑符合，但长得实在太丑（相似度太低），也打印出来看看
-                    print(
-                        f"    ❌ [淘汰] {code} ({start_dt} 至 {end_dt}) | AI逻辑: 通过 | 但形态相似度过低: {sim_score:.4f}")
-
-        # 4. 按真实的相似度降序排列，将最像的放在最上面
-        results = sorted(results, key=lambda x: x['similarity'], reverse=True)[:50]
-
-        # 5. 宽松兜底：如果 AI 规则过滤太严（通过率<5%）导致0结果，跳过第一关重扫
-        ai_pass_rate = (stats['total'] - stats['after_llm_filter']) / max(stats['total'], 1)
-        if len(results) == 0 and ai_pass_rate < 0.05 and stats['total'] > 0:
-            print(f"⚠️ [AI规则太严] 通过率仅 {ai_pass_rate*100:.1f}%，启动宽松模式：跳过AI规则，仅用相似度筛选")
-            lenient_threshold = 0.45
-            stats["after_llm_filter"] = 0  # 宽松模式不计AI过滤
-            stats["after_similarity_filter"] = 0
-            for code in stock_pool:
-                ts_code = f"{code}.SH" if str(code).startswith('6') else f"{code}.SZ"
-                df = get_stock_data(ts_code, search_start_date, search_end_date, data_folder=data_folder)
-                if df is None or df.empty or len(df) < window_size: continue
-                df = calculate_ma(df, ma_list)
-                if df.empty: continue
-                df['trade_date'] = pd.to_datetime(df['trade_date']).dt.strftime('%Y-%m-%d')
-
-                for i in range(0, len(df) - window_size + 1, step_size):
-                    window_df = df.iloc[i: i + window_size].copy()
-                    if analysis_mode == 'KLINE':
-                        target_for_sim = target_seq_kline if target_seq_kline is not None else target_df['close'].values
-                        sim_score = calc_kline_dtw_similarity(target_for_sim, window_df)
-                    else:
-                        sim_score = calc_shape_similarity(target_df, window_df, ma_cols)
-                    if sim_score > lenient_threshold:
-                        candidate_skeleton_count = -1
-                        if analysis_mode == 'KLINE' and target_skeleton_count > 0:
-                            try:
-                                w = window_df.copy()
-                                w['trade_date'] = pd.to_datetime(w['trade_date'])
-                                candidate_skeleton_count = len(_extract_skeleton_points(w))
-                            except Exception:
-                                candidate_skeleton_count = -1
-                            if candidate_skeleton_count != target_skeleton_count:
-                                continue
-                        stats["after_similarity_filter"] += 1
-                        results.append({
-                            "stock_code": code,
-                            "stock_name": code,
-                            "similarity": round(sim_score, 4),
-                            "recent_data": window_df.to_dict('records'),
-                            "ma_list": ma_list,
-                            "target_skeleton_count": target_skeleton_count,
-                            "candidate_skeleton_count": candidate_skeleton_count,
-                        })
-            results = sorted(results, key=lambda x: x['similarity'], reverse=True)[:50]
-            print(f"✅ [宽松模式] 补救找到 {len(results)} 个结果（阈值 {lenient_threshold}）")
-
-        print(
-            f"✅ 历史扫描完成: 总计{stats['total']}个，AI逻辑过滤{stats['after_llm_filter']}个，最终命中{stats['after_similarity_filter']}个")
-
-        return jsonify({
+        scan_finished = time.perf_counter()
+        response = jsonify({
             "result": results,
             "filter_stats": stats,
             "count": len(results),
             "target_code": target_code,
             "target_skeleton_count": target_skeleton_count,
             "base_ma_periods": ma_list,
-            "base_segment": target_df[['trade_date'] + ma_cols].to_dict('records')
-        }), 200
+            "base_segment": target_df[
+                ['trade_date', 'open', 'high', 'low', 'close'] if backend_only else ['trade_date'] + ma_cols
+            ].to_dict('records')
+        })
+        request_finished = time.perf_counter()
+        print(
+            f"✅ 历史扫描完成: 总计{stats['total']}个，AI逻辑过滤{stats['after_llm_filter']}个，"
+            f"最终命中{stats['after_similarity_filter']}个，"
+            f"扫描耗时{scan_finished - scan_started:.2f}秒，"
+            f"接口总耗时{request_finished - request_started:.2f}秒"
+        )
+        return response, 200
 
     except Exception as e:
         import traceback
@@ -2265,4 +2395,4 @@ def update_brush_params():
     return jsonify({"success": False, "msg": "记录不存在"})
 
 if __name__ == "__main__":
-    app.run(debug=Config.DEBUG)
+    app.run(debug=Config.DEBUG, use_reloader=False)

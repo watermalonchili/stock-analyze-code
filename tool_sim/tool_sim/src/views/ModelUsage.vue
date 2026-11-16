@@ -350,6 +350,7 @@
 <script setup>
 import { ref, computed, watch, nextTick } from "vue";
 import { useStore } from "vuex";
+import { DEFAULT_SEARCH_START, DEFAULT_SEARCH_END } from "@/store";
 import axios from "axios";
 import * as echarts from "echarts";
 import { ElMessage } from "element-plus";
@@ -541,7 +542,7 @@ const scanDateRangeDisplay = computed(() => {
   let end = store.state.searchInfo.searchEndDate;
   if (start instanceof Date) start = formatDateToLocal(start);
   if (end instanceof Date) end = formatDateToLocal(end);
-  return `${start || '2016-01-01'} 至 ${end || '2021-12-31'}`;
+  return `${start || DEFAULT_SEARCH_START} 至 ${end || DEFAULT_SEARCH_END}`;
 });
 
 // ============ 工具函数 ============
@@ -629,8 +630,8 @@ const runModelScan = async () => {
 
   let searchStart = store.state.searchInfo.searchStartDate;
   let searchEnd = store.state.searchInfo.searchEndDate;
-  if (!searchStart || searchStart === '--') searchStart = '2016-01-01';
-  if (!searchEnd || searchEnd === '--') searchEnd = '2024-12-31';
+  if (!searchStart || searchStart === '--') searchStart = DEFAULT_SEARCH_START;
+  if (!searchEnd || searchEnd === '--') searchEnd = DEFAULT_SEARCH_END;
   if (searchStart instanceof Date) searchStart = formatDateToLocal(searchStart);
   if (searchEnd instanceof Date) searchEnd = formatDateToLocal(searchEnd);
 
@@ -726,8 +727,8 @@ const runYoloScan = async () => {
 
   let searchStart = store.state.searchInfo.searchStartDate;
   let searchEnd = store.state.searchInfo.searchEndDate;
-  if (!searchStart || searchStart === '--') searchStart = '2016-01-01';
-  if (!searchEnd || searchEnd === '--') searchEnd = '2024-12-31';
+  if (!searchStart || searchStart === '--') searchStart = DEFAULT_SEARCH_START;
+  if (!searchEnd || searchEnd === '--') searchEnd = DEFAULT_SEARCH_END;
   if (searchStart instanceof Date) searchStart = formatDateToLocal(searchStart);
   if (searchEnd instanceof Date) searchEnd = formatDateToLocal(searchEnd);
 
